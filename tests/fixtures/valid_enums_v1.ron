@@ -22,7 +22,7 @@
             ],
         ),
         (
-            schema: "",
+            schema: "public",
             name: "asset_kind",
             comment: None,
             values: [

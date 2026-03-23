@@ -21,3 +21,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
+## Caveats
+
+The API for this crate should be considered to be in flux until some later date.

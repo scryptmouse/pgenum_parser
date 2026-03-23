@@ -58,13 +58,73 @@ pub enum PGEnumError {
 pub const RON_VERSION: u32 = 1;
 
 /// A representation of a PostgreSQL enum type.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnumType {
-    pub schema: String,
-    pub name: String,
-    pub comment: Option<String>,
-    pub values: Vec<String>,
+    schema: String,
+    name: String,
+    comment: Option<String>,
+    values: Vec<String>,
+    #[serde(skip)]
+    digest: String,
 }
+
+impl EnumType {
+    /// Get the comment (if present) for this enum type.
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
+    }
+
+    /// Compute a digest of the enum values for quick comparison.
+    /// This is not intended to be a secure hash, just a way to quickly check if the values have changed.
+    fn compute_digest(schema: &str, name: &str, values: &[String]) -> String {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+        schema.hash(&mut hasher);
+        name.hash(&mut hasher);
+        values.hash(&mut hasher);
+
+        format!("{:x}", hasher.finish())
+    }
+
+    /// Read the digest of the enum values. This should serve as a unique-enough identifier for any given
+    /// enum, for the sake of caching and quick comparisons.
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Retrieve the name of this enum type.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Build a new `EnumType` instance, computing the digest of the values for later comparison.
+    pub fn new(schema: String, name: String, comment: Option<String>, values: Vec<String>) -> Self {
+        let digest = Self::compute_digest(&schema, &name, &values);
+
+        EnumType {
+            schema,
+            name,
+            comment,
+            values,
+            digest,
+        }
+    }
+
+    /// Retrieve the schema of this enum type.
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+}
+
+impl PartialEq for EnumType {
+    fn eq(&self, other: &Self) -> bool {
+        self.digest == other.digest
+    }
+}
+
+impl Eq for EnumType {}
 
 #[derive(Debug, Clone)]
 enum EnumLookup {
@@ -82,15 +142,15 @@ type SchemaMap = HashMap<String, HashMap<String, usize>>;
 /// and various methods for looking an enum up by name (and optional schema).
 #[derive(Debug, Clone)]
 pub struct Database {
-    /// An identifier for the database. Not that it does not have to match the
+    /// An identifier for the database. Note that it does not have to match the
     /// actual database name, it's just a label for this set of enums that can
     /// be used to distinguish it from others if needed. For example, in Rails
     /// you may have multiple database connections in a single environment,
     /// such as `primary`, `analytics`, etc. If you are extracting enums from each,
     /// you could use those same labels here.
-    pub name: String,
+    name: String,
     /// The list of `EnumType`s defined in this database.
-    pub enums: Vec<EnumType>,
+    enums: Vec<EnumType>,
     /// A lookup map for enums by name, without considering schema. This is used to
     /// implement the `get` method that looks up by name without schema, and it also
     /// precomputes conflicts for names that exist in multiple schemas.
@@ -108,6 +168,11 @@ impl PartialEq for Database {
 impl Eq for Database {}
 
 impl Database {
+    /// Get a slice of all enums in this database.
+    pub fn enums(&self) -> &[EnumType] {
+        &self.enums
+    }
+
     /// Deserialize a RON string into a `Database`.
     ///
     /// The `version` argument is used to allow for future versions of the RON format.
@@ -133,10 +198,19 @@ impl Database {
     }
 
     /// Statically analyze a SQL dump to extract enum declarations and their values.
+    ///
+    /// It uses default parsing options, which can be customized with `from_sql_with_options`.
     pub fn from_sql(name: &str, sql: &str) -> anyhow::Result<Self> {
+        let options = SQLParsingOptions::default();
+
+        Self::from_sql_with_options(name, sql, options)
+    }
+
+    /// Statically analyze a SQL dump to extract enum declarations and their values, with options for parsing.
+    pub fn from_sql_with_options(name: &str, sql: &str, options: SQLParsingOptions) -> anyhow::Result<Self> {
         let result = parse(sql).map_err(PGEnumError::SQLParseError)?;
 
-        let mut builder = DatabaseBuilder::new(name);
+        let mut builder = DatabaseBuilder::new(name, options);
 
         for raw_stmt in &result.protobuf.stmts {
             let Some(node) = raw_stmt.stmt.as_ref().and_then(|n| n.node.as_ref()) else {
@@ -219,6 +293,11 @@ impl Database {
         }
     }
 
+    /// Get the name of this database.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Serialize to a RON string.
     pub fn to_ron(&self) -> anyhow::Result<String> {
         let v1 = DatabaseV1 {
@@ -239,6 +318,19 @@ impl Database {
         fs::write(path, ron_str).map_err(PGEnumError::IOError)?;
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SQLParsingOptions {
+    default_schema: String,
+}
+
+impl Default for SQLParsingOptions {
+    fn default() -> Self {
+        Self {
+            default_schema: "public".to_string(),
+        }
     }
 }
 
@@ -292,7 +384,10 @@ impl From<Database> for DatabaseV1 {
 }
 
 impl From<DatabaseV1> for Database {
-    fn from(v1: DatabaseV1) -> Self {
+    fn from(mut v1: DatabaseV1) -> Self {
+        for e in &mut v1.enums {
+            e.digest = EnumType::compute_digest(&e.schema, &e.name, &e.values);
+        }
         let (lookup, schemas) = build_indexes(&v1.enums);
         Database {
             name: v1.name,
@@ -309,14 +404,16 @@ struct DatabaseBuilder {
     name: String,
     enums: Vec<EnumType>,
     seen_types: HashSet<(String, String)>,
+    options: SQLParsingOptions,
 }
 
 impl DatabaseBuilder {
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: &str, options: SQLParsingOptions) -> Self {
         Self {
             name: name.to_string(),
             enums: Vec::new(),
             seen_types: HashSet::new(),
+            options,
         }
     }
 
@@ -327,6 +424,12 @@ impl DatabaseBuilder {
         values: Vec<String>,
         comment: Option<&str>,
     ) -> anyhow::Result<()> {
+        let schema = if schema.is_empty() {
+            self.options.default_schema.as_str()
+        } else {
+            schema
+        };
+
         // Check for duplicate values within this enum
         let mut seen_values = HashSet::new();
         for v in &values {
@@ -351,16 +454,23 @@ impl DatabaseBuilder {
             .into());
         }
 
-        self.enums.push(EnumType {
-            schema: schema.to_string(),
-            name: name.to_string(),
-            comment: comment.map(|s| s.to_string()),
+        self.enums.push(EnumType::new(
+            schema.to_string(),
+            name.to_string(),
+            comment.map(|s| s.to_string()),
             values,
-        });
+        ));
+
         Ok(())
     }
 
     pub fn set_comment(&mut self, schema: &str, name: &str, comment: &str) {
+        let schema = if schema.is_empty() {
+            self.options.default_schema.as_str()
+        } else {
+            schema
+        };
+
         if let Some(e) = self
             .enums
             .iter_mut()
@@ -464,7 +574,8 @@ mod tests {
 
     #[test]
     fn builder_rejects_duplicate_values() {
-        let mut builder = DatabaseBuilder::new("test");
+        let options = SQLParsingOptions::default();
+        let mut builder = DatabaseBuilder::new("test", options);
         let err = builder
             .add_enum(
                 "public",
@@ -488,7 +599,8 @@ mod tests {
 
     #[test]
     fn builder_rejects_duplicate_types() {
-        let mut builder = DatabaseBuilder::new("test");
+        let options = SQLParsingOptions::default();
+        let mut builder = DatabaseBuilder::new("test", options);
         builder
             .add_enum("public", "status", vec!["active".into()], None)
             .unwrap();
@@ -508,7 +620,7 @@ mod tests {
     }
 
     fn build_database_with_conflict() -> Database {
-        let mut builder = DatabaseBuilder::new("test");
+        let mut builder = DatabaseBuilder::new("test", SQLParsingOptions::default());
         builder
             .add_enum("public", "status", vec!["active".into()], None)
             .unwrap();
@@ -629,7 +741,7 @@ mod tests {
         let database = Database::from_sql("test", VALID_SQL).unwrap();
 
         let ak = database.enums.iter().find(|e| e.name == "asset_kind").unwrap();
-        assert_eq!(ak.schema, "");
+        assert_eq!(ak.schema, "public");
         assert_eq!(ak.values.len(), 7);
     }
 
