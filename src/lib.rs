@@ -116,6 +116,29 @@ impl EnumType {
     pub fn schema(&self) -> &str {
         &self.schema
     }
+
+    /// Retrieve the values of this enum type.
+    pub fn values(&self) -> &[String] {
+        &self.values
+    }
+}
+
+impl<'a> IntoIterator for &'a EnumType {
+    type Item = &'a String;
+    type IntoIter = std::slice::Iter<'a, String>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
+}
+
+impl IntoIterator for EnumType {
+    type Item = String;
+    type IntoIter = std::vec::IntoIter<String>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.into_iter()
+    }
 }
 
 impl PartialEq for EnumType {
@@ -157,6 +180,15 @@ pub struct Database {
     lookup: SchemalessLookup,
     /// A nested map of schema -> enum name -> index in the `enums` vector.
     schemas: SchemaMap,
+}
+
+impl<'a> IntoIterator for &'a Database {
+    type Item = &'a EnumType;
+    type IntoIter = std::slice::Iter<'a, EnumType>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.enums.iter()
+    }
 }
 
 impl PartialEq for Database {
@@ -840,5 +872,51 @@ mod tests {
         let err = database.to_ron_file("/nonexistent_dir/foo/bar.ron").unwrap_err();
         assert!(err.downcast_ref::<PGEnumError>()
             .is_some_and(|e| matches!(e, PGEnumError::IOError(_))));
+    }
+
+    #[test]
+    fn enum_type_values_returns_all_values() {
+        let e = EnumType::new(
+            "public".into(),
+            "status".into(),
+            None,
+            vec!["active".into(), "inactive".into(), "pending".into()],
+        );
+        assert_eq!(e.values(), ["active", "inactive", "pending"]);
+    }
+
+    #[test]
+    fn enum_type_values_returns_empty_slice_when_no_values() {
+        let e = EnumType::new("public".into(), "empty".into(), None, vec![]);
+        assert!(e.values().is_empty());
+    }
+
+    #[test]
+    fn enum_type_iter_yields_values_by_ref() {
+        let e = EnumType::new(
+            "public".into(),
+            "color".into(),
+            None,
+            vec!["red".into(), "green".into(), "blue".into()],
+        );
+        let collected: Vec<&String> = (&e).into_iter().collect();
+        assert_eq!(collected, vec!["red", "green", "blue"]);
+    }
+
+    #[test]
+    fn database_iter_yields_enum_types_by_ref() {
+        let db = build_database_with_conflict();
+        let names: Vec<&str> = db.into_iter().map(|e| e.name()).collect();
+        assert_eq!(names, vec!["status", "status", "color"]);
+    }
+
+    #[test]
+    fn database_iter_in_for_loop() {
+        let db = build_database_with_conflict();
+        let mut count = 0;
+        for _ in &db {
+            count += 1;
+        }
+        assert_eq!(count, db.enums().len());
     }
 }
