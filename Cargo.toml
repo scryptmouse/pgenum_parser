@@ -2,7 +2,15 @@
 name = "pgenum_parser"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 authors = ["Alexa Grey <devel@mouse.vc>"]
+keywords = ["postgresql", "ruby", "rails", "enum"]
+description = """
+A parser for PostgreSQL enum types, intended to allow static analysis
+of enum definitions in SQL dumps (such as provided by Rails' `structure.sql`).
+It uses pg_query.rs for the analysis of the SQL and can output a structured
+representation of the enum types defined in the SQL for later consumption.
+"""
 
 [dependencies]
 anyhow = "1.0.102"
