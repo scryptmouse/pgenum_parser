@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github-scryptmouse/scryptmouse/pgenum_parser/compare/v0.1.0...v0.2.0) - 2026-03-23
+
+### Added
+
+- [**breaking**] digests, default schemas, restrict fields
+
 ## [0.1.0](https://github-scryptmouse/scryptmouse/pgenum_parser/releases/tag/v0.1.0) - 2026-03-23
 
 ### Added
